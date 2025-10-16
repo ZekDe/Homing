@@ -1,6 +1,6 @@
 #include "homing.h"
 #include "string.h"
-#include "retarget.h"
+#include "stdio.h"
 
 static const homing_funcs_t *funcs_ptr = NULL;
 
@@ -12,16 +12,12 @@ static void stopActuator(void);
 static void resetAllTimers(homing_t *homing);
 
 
-
 void homingInit(homing_t *homing, const homing_funcs_t *funcs)
 {
-    // Store HAL pointer
 	funcs_ptr = funcs;
 
-    // Initialize structure
     memset(homing, 0, sizeof(homing_t));
 
-    // Set configuration parameters
     homing->debounce_time_ms = HOMING_DEBOUNCE_TIME;
     homing->timeout_ms = HOMING_TIMEOUT;
     homing->settle_time_ms = HOMING_SETTLE_TIME;
@@ -37,10 +33,9 @@ uint8_t homingStart(homing_t *homing)
 {
     if (homing->is_homing_active)
     {
-        return 0; // Already running
+        return 0;
     }
 
-    // Reset state
     homing->state = HOMING_STATE_INIT;
     homing->error = HOMING_ERROR_NONE;
     homing->is_homing_active = 1;
@@ -48,8 +43,8 @@ uint8_t homingStart(homing_t *homing)
     homing->progress_percent = 0;
     homing->current_retry = 0;
     homing->extend_travel_time_ms = 0;
+	homing->retract_travel_time_ms = 0;
 
-    // Reset all timers and edge detectors
     resetAllTimers(homing);
 
     return 1;
@@ -72,7 +67,6 @@ void homingProcess(homing_t *homing)
     uint8_t state_changed = (homing->state != homing->prevstate);
     homing->prevstate = homing->state;
 
-    // Check timeout for movement states
     uint8_t timeout_occurred = 0;
     if (homing->state >= HOMING_STATE_MOVE_TO_RETRACT_LIMIT &&
         homing->state <= HOMING_STATE_MOVE_TO_CENTER)
@@ -99,8 +93,10 @@ void homingProcess(homing_t *homing)
             homing->ton_timeout.aux = 0;
 
             setActuatorDirection(ACTUATOR_DIR_RETRACT);
+			#ifdef HOMING_DEBUG
             if(state_changed)
-            	print("HOMING_STATE_INIT\r\n");
+            	printf("HOMING_STATE_INIT\r\n");
+			#endif
             break;
         }
 
@@ -108,7 +104,9 @@ void homingProcess(homing_t *homing)
         {
             homing->progress_percent = 15;
             if(state_changed)
-            	print("GOTO RETRACT SW\r\n");
+				#ifdef HOMING_DEBUG
+            	printf("GOTO RETRACT SW\r\n");
+			#endif
             if (homing->retract_switch_pulse)
             {
                 stopActuator();
@@ -122,15 +120,15 @@ void homingProcess(homing_t *homing)
         {
             homing->progress_percent = 20;
 
-            //Settle süresini bekle
             if (TON(&homing->ton_settle, 1, current_time, homing->settle_time_ms))
             {
-                // Settle tamamlandı, ölçüm state'ine geç
                 homing->retract_limit_reached_time = current_time;
                 homing->ton_timeout.aux = 0;
                 homing->state = HOMING_STATE_MEASURE_EXTEND;
                 setActuatorDirection(ACTUATOR_DIR_EXTEND);
-                print("HOMING_STATE_SETTLE_AT_RETRACT\r\n");
+				#ifdef HOMING_DEBUG
+                printf("HOMING_STATE_SETTLE_AT_RETRACT\r\n");
+				#endif
             }
             break;
         }
@@ -138,20 +136,22 @@ void homingProcess(homing_t *homing)
         case HOMING_STATE_MEASURE_EXTEND:
         {
             homing->progress_percent = 40;
+			#ifdef HOMING_DEBUG
             if(state_changed)
-            print("GOTO EXTEND SW\r\n");
+				printf("GOTO EXTEND SW\r\n");
+			#endif
             if (homing->extend_switch_pulse)
             {
-                //Toplam yol süresini hesapla
                 homing->extend_travel_time_ms = current_time - homing->retract_limit_reached_time;
 
-                //Yol süresini doğrula
                 if (homing->extend_travel_time_ms < 100)
                 {
                     transitionToError(homing, HOMING_ERROR_INVALID_TRAVEL);
                     break;
                 }
-
+				#ifdef HOMING_DEBUG
+				printf("extend_travel_time_ms = %lu\r\n", homing->extend_travel_time_ms);
+				#endif
                 stopActuator();
                 homing->ton_settle.aux = 0;
                 homing->state = HOMING_STATE_SETTLE_AT_EXTEND;
@@ -163,43 +163,105 @@ void homingProcess(homing_t *homing)
         {
             homing->progress_percent = 50;
 
-            // Settle süresini bekle
             if (TON(&homing->ton_settle, 1, current_time, homing->settle_time_ms))
             {
-                // Settle tamamlandı, merkeze gitmeye başla
+				homing->extend_limit_reached_time = current_time;
                 homing->ton_timeout.aux = 0;
                 homing->ton_center_move.aux = 0;
-                homing->state = HOMING_STATE_MOVE_TO_CENTER;
+                homing->state = HOMING_STATE_MEASURE_RETRACT;
                 setActuatorDirection(ACTUATOR_DIR_RETRACT);
-                print("HOMING_STATE_SETTLE_AT_EXTEND\r\n");
+				#ifdef HOMING_DEBUG
+                printf("HOMING_STATE_SETTLE_AT_EXTEND\r\n");
+				#endif
             }
             break;
         }
 
-        case HOMING_STATE_MOVE_TO_CENTER:
-        {
-            uint32_t half_travel = homing->extend_travel_time_ms / 2;
+		// ****
+		case HOMING_STATE_MEASURE_RETRACT:
+        {                
+            homing->progress_percent = 60;
+            #ifdef HOMING_DEBUG
+			if (state_changed)
+                printf("GOTO RETRACT SW\r\n");
+			#endif
+            if (homing->retract_switch_pulse)
+            {
 
-            // Progress hesaplama
-            if (half_travel > 0 && homing->ton_center_move.aux)
+                homing->retract_travel_time_ms = current_time - homing->extend_limit_reached_time;
+                #ifdef HOMING_DEBUG
+                printf("retract_travel_time_ms = %lu\r\n", homing->retract_travel_time_ms);
+				#endif
+                if (homing->retract_travel_time_ms < 100)
+                {
+                    transitionToError(homing, HOMING_ERROR_INVALID_TRAVEL);
+                    break;
+                }
+
+                stopActuator();
+                homing->ton_settle.aux = 0;
+                homing->state = HOMING_STATE_SETTLE_AT_RETRACT_2;
+            }
+            break;
+        }
+		
+		case HOMING_STATE_SETTLE_AT_RETRACT_2:
+        {      
+            homing->progress_percent = 70;
+
+            // Settle süresini bekle
+            if (TON(&homing->ton_settle, 1, current_time, homing->settle_time_ms))
+            {
+                homing->ton_timeout.aux = 0;
+                homing->ton_center_move.aux = 0;
+                homing->state = HOMING_STATE_MOVE_TO_CENTER;
+                setActuatorDirection(ACTUATOR_DIR_EXTEND);
+				#ifdef HOMING_DEBUG
+				printf("HOMING_STATE_SETTLE_AT_RETRACT_2\r\n");
+				#endif
+            }
+            break;
+        }
+		
+		case HOMING_STATE_MOVE_TO_CENTER:
+        {
+            //Extend yönünde ölçülen sürenin yarısı kadar git
+            uint32_t half_extend_time = homing->extend_travel_time_ms / 2;
+
+            //Progress hesaplama
+            if (half_extend_time > 0 && homing->ton_center_move.aux)
             {
                 uint32_t elapsed = current_time - homing->ton_center_move.since;
-                uint32_t progress_range = (elapsed * 45) / half_travel;
-                homing->progress_percent = 50 + (uint8_t)progress_range;
+                uint32_t progress_range = (elapsed * 25) / half_extend_time;
+                homing->progress_percent = 70 + (uint8_t)progress_range;
+				
                 if (homing->progress_percent > 95)
                 {
                     homing->progress_percent = 95;
                 }
             }
 
-            // Yarı yolu bekle
-            if (TON(&homing->ton_center_move, 1, current_time, half_travel))
+            //Extend yönünde yarı yolu bekle
+            if (TON(&homing->ton_center_move, 1, current_time, half_extend_time))
             {
                 stopActuator();
                 homing->state = HOMING_STATE_COMPLETE;
                 homing->is_homed = 1;
                 homing->progress_percent = 100;
-                print("NOW CENTER POS\r\n");
+				#ifdef HOMING_DEBUG
+                printf("NOW AT CENTER POSITION!\r\n");
+                printf("Extend time: %lu ms, Retract time: %lu ms\r\n", 
+                      homing->extend_travel_time_ms, 
+                      homing->retract_travel_time_ms);
+				printf("spped ratio(E/R): %f\r\n",homing->extend_travel_time_ms / (float)homing->retract_travel_time_ms);
+				
+				float extend_velocity = ACTUATOR_STROKE_MM  / (float)homing->extend_travel_time_ms;
+				float retract_velocity = ACTUATOR_STROKE_MM / (float)homing->retract_travel_time_ms;
+
+				printf("Extend speed: %f m/s\r\n", extend_velocity);
+				printf("Retract speed: %f m/s\r\n", retract_velocity);
+				#endif
+				
             }
             break;
         }
@@ -207,19 +269,26 @@ void homingProcess(homing_t *homing)
         case HOMING_STATE_COMPLETE:
         {
             homing->is_homing_active = 0;
+			#ifdef HOMING_DEBUG
             if(state_changed)
-            print("COMPLETED\r\n");
+				printf("COMPLETED\r\n");
+			#endif
             break;
         }
 
         case HOMING_STATE_ERROR:
         {
             stopActuator();
-            print("ERROR\r\n");
-            // Retry logic
+			#ifdef HOMING_DEBUG
+            printf("ERROR\r\n");
+			#endif
+            //Retry
             if (homing->current_retry < homing->retry_count)
             {
                 homing->current_retry++;
+				#ifdef HOMING_DEBUG
+				printf("Retry %d/%d\r\n", homing->current_retry, homing->retry_count);
+				#endif
                 homing->state = HOMING_STATE_INIT;
                 homing->error = HOMING_ERROR_NONE;
                 resetAllTimers(homing);
