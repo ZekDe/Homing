@@ -10,6 +10,10 @@
 #define HOMING_SETTLE_TIME           100
 #define HOMING_RETRY_COUNT           3
 
+#define ACTUATOR_STROKE_MM  100
+
+#define HOMING_DEBUG
+
 
 typedef enum
 {
@@ -27,6 +31,8 @@ typedef enum
     HOMING_STATE_SETTLE_AT_RETRACT, // wait there to be sure
     HOMING_STATE_MEASURE_EXTEND,
     HOMING_STATE_SETTLE_AT_EXTEND, // wait there to be sure
+	HOMING_STATE_MEASURE_RETRACT, // *
+    HOMING_STATE_SETTLE_AT_RETRACT_2, //*		
     HOMING_STATE_MOVE_TO_CENTER,
     HOMING_STATE_COMPLETE,
     HOMING_STATE_ERROR
@@ -70,7 +76,9 @@ typedef struct
 
     // Timing measurements
     uint32_t retract_limit_reached_time;
+	uint32_t extend_limit_reached_time;
     uint32_t extend_travel_time_ms;
+	uint32_t retract_travel_time_ms;
 
     // Configuration
     uint32_t debounce_time_ms;
